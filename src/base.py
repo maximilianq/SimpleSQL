@@ -70,8 +70,17 @@ class Query:
 class SQLRouter:
 
     def __init__(self) -> None:
+        
+        self.database: SimpleSQL = None
+        
         self.listeners: dict[str, list[Callable[[dict | str], None]]] = {}
-
+    
+    def __getattr__(self, name: str) -> Query:
+        if self.database:
+            return self.database.get_query(name)
+        else:
+            raise Error("Error: router needs to be bound to database to be queried!")
+        
     def add_listener(self, event: str, callback: Callable[[dict | str], None]) -> None:
         if event in self.listeners:
             self.listeners[event].append(callback)
@@ -107,7 +116,24 @@ class SimpleSQL:
         self.pipes: list[Callable[[str, dict | str], None]] = []
     
     def __getattr__(self, name: str) -> Query:
-        return self.queries[name]
+        return self.get_query(name)
+    
+    def get_query(self, name: str) -> Query:
+        if name in self.queries:
+            return self.queries.get(name, None)
+        else:
+            raise Error(f'Error: query "{name}" could not be found!')
+
+    def add_listener(self, event: str, callback: Callable[[dict | str], None]) -> None:
+        if event in self.listeners:
+            self.listeners[event].append(callback)
+        else:
+            self.listeners[event] = [callback]
+
+    def listen(self, event: str) -> Callable[[str], Callable[[dict | str], None]]:
+        def decorate(callback: Callable[[dict | str], None]) -> None:
+            self.add_listener(event, callback)
+        return decorate
     
     def include_queries(self, path: str, prefix: str = None):
 
@@ -124,6 +150,11 @@ class SimpleSQL:
                 self.include_queries(f'{path}/{item}', prefix = identifier)
 
     def include_router(self, router: SQLRouter):
+
+        if not router.database:
+            router.database = self
+        else:
+            raise Error("Error: router can't be bound to multiple database instances!")
 
         for event, listeners in router.listeners.items():
             if event in self.listeners:
