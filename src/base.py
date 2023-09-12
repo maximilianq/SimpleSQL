@@ -6,11 +6,12 @@ from os.path import splitext, isdir, isfile
 from pathlib import Path as File
 from string import Formatter
 
+from logging import getLogger, Logger
+
 from psycopg import AsyncConnection as Connection, AsyncCursor as Cursor, AsyncClientCursor
 from psycopg.errors import Error
 
 from asyncio import sleep, set_event_loop_policy, WindowsSelectorEventLoopPolicy
-
 set_event_loop_policy(WindowsSelectorEventLoopPolicy())
 
 formatter: Formatter = Formatter()
@@ -51,19 +52,19 @@ class Query:
 
     async def prepare(self) -> None:
 
-        #logger.debug(f'Preparing query {self.name} ({self.guid}).')
+        self.database.logger.debug(f'Preparing query {self.name} ({self.guid}).')
 
         await self.database._execute(self.prepare_query)
     
     async def execute(self, data: dict[str, object] = {}) -> object | dict[str, object] | list[object] | list[dict[str, object]]:
 
-        #logger.debug(f'Execute query {self.name} ({self.guid})')
+        self.database.logger.debug(f'Execute query {self.name} ({self.guid})')
 
         return await self.database._query(self.execute_query, {parameter: data.get(parameter, None) for parameter in self.parameters})
 
     async def deallocate(self) -> None:
 
-        #logger.debug(f'Deallocating query {self.name} ({self.guid}).')
+        self.database.logger.debug(f'Deallocating query {self.name} ({self.guid}).')
 
         await self.database._execute(self.deallocate_query)
 
@@ -101,13 +102,15 @@ class SQLRouter:
 
 class SimpleSQL:
 
-    def __init__(self, host: str, port: int, username: str, password: str, database: str) -> None:
+    def __init__(self, host: str, port: int, username: str, password: str, database: str, logger: Logger = getLogger()) -> None:
         
         self.host: str = host
         self.port: int = port
         self.username: str = username
         self.password: str = password
         self.database: str = database
+
+        self.logger: Logger = logger
 
         self.connection: Connection = None
 
@@ -245,7 +248,7 @@ class SimpleSQL:
 
                 async for notify in self.connection.notifies():
 
-                    #logger.debug(f'Recieved database event "{notify.channel}".')
+                    self.logger.debug(f'Recieved database event "{notify.channel}".')
 
                     print(f'Recieved database event "{notify.channel}".')
 
