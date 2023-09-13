@@ -39,7 +39,6 @@ class Query:
         for index, parameter in enumerate(self.parameters):
             self.formatted = self.formatted.replace('{' + parameter + '}', '$' + str(index + 1))
 
-
     async def prepare(self):
         self.statement = await self.database._prepare(self.formatted)
 
@@ -87,11 +86,14 @@ class SQLRouter:
 class SQLClient:
 
     def __init__(self, host: str, port: int, user: str, password: str, database: str) -> None:
+
         self.host: str = host
         self.port: int = port
         self.user: str = user
         self.password: str = password
         self.database: str = database
+
+        self.logger: Logger = logger
 
         self.connection: Connection = None
 
