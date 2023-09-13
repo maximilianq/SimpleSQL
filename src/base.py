@@ -11,14 +11,18 @@ from asyncpg.exceptions import PostgresError
 
 from json import loads, JSONDecodeError
 
+from logging import getLogger, Logger
+
 from string import Formatter
 
 formatter: Formatter = Formatter()
 
 class Query:
 
-    def __init__(self, database: "SQLClient", query: str) -> None:
+    def __init__(self, database: "SQLClient", name: str, query: str) -> None:
+
         self.database: SQLClient = database
+        self.name: str = name
         self.query: str = query
 
         self.formatted: str = None
@@ -40,9 +44,12 @@ class Query:
             self.formatted = self.formatted.replace('{' + parameter + '}', '$' + str(index + 1))
 
     async def prepare(self):
+        self.database.logger.debug(f'Preparing query "{self.name}" for a later use.')
         self.statement = await self.database._prepare(self.formatted)
 
     async def execute(self, parameters: dict[str, object]):
+        
+        self.database.logger.debug(f'Executing query "{self.name}".')
         return await self.database._execute(self.statement, [parameters.get(parameter, None) for parameter in self.parameters])
 
 class Listener:
@@ -85,7 +92,7 @@ class SQLRouter:
 
 class SQLClient:
 
-    def __init__(self, host: str, port: int, user: str, password: str, database: str) -> None:
+    def __init__(self, host: str, port: int, user: str, password: str, database: str, logger: Logger = getLogger()) -> None:
 
         self.host: str = host
         self.port: int = port
@@ -120,7 +127,7 @@ class SQLClient:
         if name in self.queries:
             raise Exception('Error: multiple queries with the same alias!')
         else:
-            self.queries[name] = Query(self, query)
+            self.queries[name] = Query(self, name, query)
 
     def include_queries(self, path: str, prefix: str = None):
 
@@ -131,7 +138,7 @@ class SQLClient:
 
             if isfile(f'{path}/{item}'):
                 if extension.lower() == '.sql':
-                    self.queries[identifier] = Query(self, File(f'{path}/{item}').read_text())
+                    self.queries[identifier] = Query(self, identifier, File(f'{path}/{item}').read_text())
 
             if isdir(f'{path}/{item}'):
                 self.include_queries(f'{path}/{item}', prefix = identifier)
@@ -173,6 +180,7 @@ class SQLClient:
     async def _listen(self, channel: str, callback: Callable[[dict[str, object] | str], Awaitable]):
         
         async def handle(connection, pid, chanel, payload):
+            self.logger.debug(f'Recieved event on "{channel}".')
             try:
                 await callback(loads(payload))
             except JSONDecodeError:
