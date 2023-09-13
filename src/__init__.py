@@ -1,1 +1,1 @@
-from .base import SimpleSQL, SQLRouter
+from .base import SQLClient, SQLRouter
