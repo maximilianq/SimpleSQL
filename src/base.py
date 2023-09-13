@@ -1,241 +1,179 @@
-from uuid import UUID as uuid, uuid4
-from json import loads, JSONDecodeError
-from typing import Callable
+from typing import Callable, Awaitable
+
 from os import listdir
 from os.path import splitext, isdir, isfile
 from pathlib import Path as File
+
+from asyncpg.connection import connect, Connection
+from asyncpg.prepared_stmt import PreparedStatement
+from asyncpg.transaction import Transaction
+from asyncpg.exceptions import PostgresError
+
+from json import loads, JSONDecodeError
+
 from string import Formatter
-
-from psycopg import AsyncConnection as Connection, AsyncCursor as Cursor, AsyncClientCursor
-from psycopg.errors import Error
-
-from asyncio import sleep, set_event_loop_policy, WindowsSelectorEventLoopPolicy
-
-set_event_loop_policy(WindowsSelectorEventLoopPolicy())
 
 formatter: Formatter = Formatter()
 
 class Query:
 
-    def __init__(self, database: "SimpleSQL", name: str, query: str) -> None:
-
-        self.database: SimpleSQL = database
-
-        self.name: str = name
+    def __init__(self, database: "SQLClient", query: str) -> None:
+        self.database: SQLClient = database
         self.query: str = query
 
+        self.formatted: str = None
         self.parameters: list[str] = None
 
-        self.prepare_query: str = None
-        self.execute_query: str = None
-        self.deallocate_query: str = None
+        self.statement: PreparedStatement = None
 
-        self._process_query()
-
-    async def __call__(self, **kwargs: dict[str, object]) -> None:
-        return await self.execute(kwargs)
+        self._format_query()
     
-    def _process_query(self):
-        
-        query_replace: str = self.query
+    async def __call__(self, **parameters: dict[str, object]) -> list[dict[str, object]]:
+        return await self.execute(parameters)
 
-        self.parameters = list(dict.fromkeys([item[1] for item in formatter.parse(query_replace) if item[1]]))
+    def _format_query(self) -> None:
+
+        self.formatted = self.query
+
+        self.parameters = list(dict.fromkeys([item[1] for item in formatter.parse(self.query) if item[1]]))
         for index, parameter in enumerate(self.parameters):
-            query_replace = query_replace.replace('{' + parameter + '}', '$' + str(index + 1))
+            self.formatted = self.formatted.replace('{' + parameter + '}', '$' + str(index + 1))
 
-        self.guid: uuid = uuid4()
 
-        self.prepare_query = f'PREPARE "{self.guid}" AS {query_replace.removesuffix(";")};'
-        self.execute_query = f'EXECUTE "{self.guid}"({", ".join([f"%({parameter})s" for parameter in self.parameters])});'
-        self.deallocate_query = f'DEALLOCATE "{self.guid}";'
+    async def prepare(self):
+        self.statement = await self.database._prepare(self.formatted)
 
-    async def prepare(self) -> None:
+    async def execute(self, parameters: dict[str, object]):
+        return await self.database._execute(self.statement, [parameters.get(parameter, None) for parameter in self.parameters])
 
-        #logger.debug(f'Preparing query {self.name} ({self.guid}).')
+class Listener:
 
-        await self.database._execute(self.prepare_query)
-    
-    async def execute(self, data: dict[str, object] = {}) -> object | dict[str, object] | list[object] | list[dict[str, object]]:
+    def __init__(self, name: str, callback: Callable[[str | dict[str, object] | list[dict[str, object]]], Awaitable]) -> None:
+        self.name = name
+        self.callback = callback
+        
+        self.database: SQLClient = None
 
-        #logger.debug(f'Execute query {self.name} ({self.guid})')
-
-        return await self.database._query(self.execute_query, {parameter: data.get(parameter, None) for parameter in self.parameters})
-
-    async def deallocate(self) -> None:
-
-        #logger.debug(f'Deallocating query {self.name} ({self.guid}).')
-
-        await self.database._execute(self.deallocate_query)
+    async def listen(self):
+        await self.database._listen(self.name, self.callback)
 
 class SQLRouter:
 
     def __init__(self) -> None:
-        self.listeners: dict[str, list[Callable[[dict | str], None]]] = {}
+        self.database: SQLClient = None
+        self.parent: SQLRouter = None
+        self.listeners: list[Listener] = []
 
-    def add_listener(self, event: str, callback: Callable[[dict | str], None]) -> None:
-        if event in self.listeners:
-            self.listeners[event].append(callback)
+    def get_query(self, name: str) -> Query:
+        if self.parent:
+            return self.parent.get_query(name)
+        elif self.database:
+            return self.database.get_query(name)
         else:
-            self.listeners[event] = [callback]
+            raise Exception(f'Error: router is not directly or indirectly connected to database!')
 
-    def listen(self, event: str) -> Callable[[str], Callable[[dict | str], None]]:
+    def listen(self, name: str) -> Callable[[str], Callable[[dict | str], None]]:
         def decorate(callback: Callable[[dict | str], None]) -> None:
-            self.add_listener(event, callback)
+            self.include_listener(Listener(name, callback))
         return decorate
     
+    def include_listener(self, listener: Listener) -> None:
+        self.listeners.append(listener)
+
     def include_router(self, router: "SQLRouter") -> None:
-        for event, listeners in router.listeners.items():
-            if event in self.listeners:
-                self.listeners[event] = self.listeners[event] + listeners
-            else:
-                self.listeners[event] = listeners
+        router.parent = self
+        self.listeners = self.listeners + router.listeners
 
-class SimpleSQL:
+class SQLClient:
 
-    def __init__(self, host: str, port: int, username: str, password: str, database: str) -> None:
-        
+    def __init__(self, host: str, port: int, user: str, password: str, database: str) -> None:
         self.host: str = host
         self.port: int = port
-        self.username: str = username
+        self.user: str = user
         self.password: str = password
         self.database: str = database
 
         self.connection: Connection = None
 
         self.queries: dict[str, Query] = {}
-        self.listeners: dict[str, list[Callable[[dict | str], None]]] = {}
-        self.pipes: list[Callable[[str, dict | str], None]] = []
+        self.listeners: list[Listener] = []
     
-    def __getattr__(self, name: str) -> Query:
-        return self.queries[name]
-    
+    def __getattr__(self, name: str) -> list[dict[str, object]]:
+        return self.get_query(name)
+
+    def get_query(self, name: str) -> Query:
+        if name in self.queries:
+            return self.queries[name]
+        else:
+            raise Exception(f'Error: query "{name}" could not be found!')
+
+    def include_router(self, router: SQLRouter):
+
+        router.database = self
+        
+        for listener in router.listeners:
+            self.include_listener(listener)
+
+    def include_query(self, name: str, query: str):
+        if name in self.queries:
+            raise Exception('Error: multiple queries with the same alias!')
+        else:
+            self.queries[name] = Query(self, query)
+
     def include_queries(self, path: str, prefix: str = None):
 
         for item in listdir(path):
 
             name, extension = splitext(item)
-            identifier: str = (prefix + '_' if prefix else '') + name.upper()
+            identifier: str = (prefix + '_' if prefix else '') + name.lower()
 
             if isfile(f'{path}/{item}'):
-                if extension.upper() == '.SQL':
-                    self.queries[identifier] = Query(self, name.upper(), File(f'{path}/{item}').read_text())
+                if extension.lower() == '.sql':
+                    self.queries[identifier] = Query(self, File(f'{path}/{item}').read_text())
 
             if isdir(f'{path}/{item}'):
                 self.include_queries(f'{path}/{item}', prefix = identifier)
 
-    def include_router(self, router: SQLRouter):
-
-        for event, listeners in router.listeners.items():
-            if event in self.listeners:
-                self.listeners[event] = self.listeners[event] + listeners
-            else:
-                self.listeners[event] = listeners
-
-    def include_pipe(self, callback: Callable[[str, dict | None], None]):
-        self.pipes.append(callback)
+    def include_listener(self, listener: Listener):
+        listener.database = self
+        self.listeners.append(listener)
 
     async def start(self):
-        self.connection = await Connection.connect(f'host={self.host} port={self.port} dbname={self.database} user={self.username} password={self.password}', prepare_threshold = False)
-        await self._prepare()
-
-    async def listen(self):
-        await self._listen()
-
-    async def execute(self, query: Query, data: dict[str, object] = {}) -> object | dict[str, object] | list[object] | list[dict[str, object]]:
-        await query.execute(self, data)
-
-    async def stop(self):
-        await self._deallocate()
-        await self.connection.close()
-
-    async def _execute(self, query: str) -> bool:
-
-        try:
-            cursor: Cursor = await self.connection.execute(query)
-
-        except Error as error:
-            print(error)
-            await self.connection.rollback()
-            return False
-
-        await self.connection.commit()
-        await cursor.close()
-
-        return True
+        self.connection = await connect(host = self.host, port = self.port, user = self.user, password = self.password, database = self.database)
     
-    async def _query(self, query: str, data: dict[str, object]) -> object | dict[str, object] | list[object] | list[dict[str, object]]:
-
-        cursor: Cursor = AsyncClientCursor(self.connection)
-
-        try:
-            await cursor.execute(query, data)
-
-        except Error as error:
-            await self.connection.rollback()
-            return None
-
-        output: object | dict[str, object] | list[object] | list[dict[str, object]] = None
-
-        if cursor.description:
-            rows: list[tuple] = await cursor.fetchall()
-            if len(rows) == 1:
-                if len(cursor.description) == 1:
-                    output = rows[0][0]
-                else:
-                    output = {column.name: rows[0][index] for index, column in enumerate(cursor.description)}
-            else:
-                if len(cursor.description) == 1:
-                    output = [row[0] for row in rows]
-                else:
-                    output = [{column.name: row[index] for index, column in enumerate(cursor.description)} for row in rows]
-
-        await self.connection.commit()
-        await cursor.close()
-
-        return output
-
-    async def _prepare(self) -> None:
-        
+    async def stop(self):
+        await self.connection.close()
+    
+    async def prepare(self):
         for query in self.queries.values():
             await query.prepare()
+    
+    async def listen(self):
+        for listener in self.listeners:
+            await listener.listen()
 
-    async def _listen(self):
+    async def _prepare(self, query: str) -> PreparedStatement:
+        return await self.connection.prepare(query)
 
-        cursor: Cursor = self.connection.cursor()
-
-        for event in self.listeners:
-            await cursor.execute(f'LISTEN "{event}";')
-
-        await self.connection.commit()
-
+    async def _execute(self, statement: PreparedStatement, parameters: list[object]):
+        transaction: Transaction = self.connection.transaction()
         try:
+            await transaction.start()
+            records: list = await statement.fetch(*parameters)
+        except PostgresError as error:
+            await transaction.rollback()
+            return None
+        else:
+            await transaction.commit()
 
-            while await sleep(0.1, True):
+        return [{key: value for key, value in record.items()} for record in records]
 
-                async for notify in self.connection.notifies():
+    async def _listen(self, channel: str, callback: Callable[[dict[str, object] | str], Awaitable]):
+        
+        async def handle(connection, pid, chanel, payload):
+            try:
+                await callback(loads(payload))
+            except JSONDecodeError:
+                await callback(payload)
 
-                    #logger.debug(f'Recieved database event "{notify.channel}".')
-
-                    print(f'Recieved database event "{notify.channel}".')
-
-                    for listener in self.listeners.get(notify.channel, []):
-                        try:
-                            await listener(loads(notify.payload))
-                        except JSONDecodeError:
-                            await listener(notify.payload)
-
-                    for pipe in self.pipes:
-                        await pipe(notify.channel, notify.payload)
-                    
-        finally:
-
-            for event in self.listeners:
-                await cursor.execute(f'UNLISTEN "{event}";')
-
-            await self.connection.commit()
-            await cursor.close()
-
-    async def _deallocate(self):
-
-        for query in self.queries.values():
-            await query.deallocate()
+        await self.connection.add_listener(channel, handle)
