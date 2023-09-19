@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simplesql"
+version = "0.0.5"
+authors = [
+  {name = "Maximilian Quaeck", email = "maximilian.quaeck@gmx.de"}
+]
+description = "SimpleSQL framework, high performance, easy to learn, fast to code, ready for production."
+dependencies = [
+    "asyncpg >= 0.28.0"
+]

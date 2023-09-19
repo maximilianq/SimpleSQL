@@ -79,7 +79,8 @@ class SQLRouter:
     
     def include_router(self, router: "SQLRouter") -> None:
         router.parent = self
-        self.listeners = self.listeners + router.listeners
+        for event, listeners in router.listeners:
+            self.listeners[event] = self.listeners.get(event, []) + listeners
 
     def include_routers(self, routers: list["SQLRouter"]):
         for router in routers:
@@ -117,7 +118,7 @@ class SQLClient:
     def register_event(self, event: str):
         self.events.add(event)
 
-    def register_events(self, events: list[str]):
+    def register_events(self, *events: list[str]):
         for event in events:
             self.register_event(event)
 
@@ -196,7 +197,13 @@ class SQLClient:
             await transaction.commit()
             if len(records) == 1:
                 if len(records[0]) == 1:
-                    return records[0][0]
+
+                    try:
+                        output = loads(records[0][0])
+                    except ValueError:
+                        output = records[0][0]
+
+                    return output
                 if len(records[0]) > 1:
                     return {name: value for name, value in records[0].items()}
             if len(records) > 1:
