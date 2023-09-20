@@ -1,4 +1,4 @@
-from typing import Any, Callable, Awaitable
+from typing import Callable, Awaitable
 
 from os import listdir
 from os.path import splitext, isdir, isfile
@@ -78,8 +78,11 @@ class SQLRouter:
         return decorate
     
     def include_router(self, router: "SQLRouter") -> None:
+
         router.parent = self
-        self.listeners = self.listeners + router.listeners
+        
+        for event, listeners in router.listeners:
+            self.listeners[event] = self.listeners.get(event, []) + listeners
 
     def include_routers(self, routers: list["SQLRouter"]):
         for router in routers:
@@ -117,7 +120,7 @@ class SQLClient:
     def register_event(self, event: str):
         self.events.add(event)
 
-    def register_events(self, events: list[str]):
+    def register_events(self, *events: list[str]):
         for event in events:
             self.register_event(event)
 

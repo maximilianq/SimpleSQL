@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simplesql"
+version = "0.0.5"
+authors = [
+  {name = "Maximilian Quaeck", email = "maximilian.quaeck@gmx.de"}
+]
+description = "Simple and Fast Toolkit to query a database and listen for notifications build apon."
+dependencies = [
+    "asyncpg >= 0.28.0"
+]
