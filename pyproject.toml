@@ -2,6 +2,9 @@
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools]
+package-dir = {simplesql = "src" }
+
 [project]
 name = "simplesql"
 version = "0.0.5"
