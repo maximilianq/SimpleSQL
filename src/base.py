@@ -199,7 +199,10 @@ class SQLClient:
             await transaction.commit()
             if len(records) == 1:
                 if len(records[0]) == 1:
-                    return records[0][0]
+                    try:
+                        return loads(records[0][0])
+                    except ValueError:
+                        return records[0][0]
                 if len(records[0]) > 1:
                     return {name: value for name, value in records[0].items()}
             if len(records) > 1:
