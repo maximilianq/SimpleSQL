@@ -56,37 +56,44 @@ class SQLRouter:
     def __init__(self) -> None:
         self.database: SQLClient = None
         self.parent: SQLRouter = None
-        self.listeners: dict[str, list[Callable[[object | list[object] | dict[str, object] | list[dict[str, object]]], Awaitable]]] = dict()
 
-    def __getattr__(self, name: str) -> list[dict[str, object]]:
+        self.listeners: dict[str, dict[str, list[Callable[[object], Callable | Awaitable]]]] = dict()
+
+    def __getattr__(self, name: str) -> Query:
         return self.get_query(name)
 
     def get_query(self, name: str) -> Query:
+
         if self.parent:
             return self.parent.get_query(name)
+        
         elif self.database:
             return self.database.get_query(name)
+        
         else:
             raise Exception(f'Error: router is not directly or indirectly connected to database!')
 
-    def listen(self, event: str) -> Callable[[str], Callable[[dict | str], None]]:
+    def listen(self, entity: str, event: str) -> Callable[[str], Callable[[dict | str], None]]:
+        
         def decorate(callback: Callable[[dict | str], None]) -> None:
-            if event in self.listeners:
-                self.listeners[event].append(callback)
-            else:
-                self.listeners[event] = [callback]
+            self.include_listener(entity, event, callback)
+        
         return decorate
     
-    def include_router(self, router: "SQLRouter") -> None:
+    def include_listener(self, entity: str, event: str, listener: Callable[[object], Callable | Awaitable]):
+        
+        self.listeners[entity] = self.listeners.get(entity, dict())
+        self.listeners[entity][event] = self.listeners[entity].get(event, list())
+        self.listeners[entity][event].append(listener)
+        
+    def include_router(self, router: "SQLRouter"):
 
         router.parent = self
-        
-        for event, listeners in router.listeners:
-            self.listeners[event] = self.listeners.get(event, []) + listeners
 
-    def include_routers(self, routers: list["SQLRouter"]):
-        for router in routers:
-            self.include_router(router)
+        for entity, events in router.listeners.items():
+            for event, listeners in events.items():
+                for listener in listeners:
+                    self.include_listener(entity, event, listener)
 
 class SQLClient:
 
@@ -102,46 +109,79 @@ class SQLClient:
 
         self.connection: Connection = None
 
-        self.queries: dict[str, Query] = {}
+        self.queries: dict[str, Query] = dict()
 
-        self.events: set[str] = set()
-        self.listeners: dict[str, list[Callable[[object | list[object] | dict[str, object] | list[dict[str, object]]], Awaitable]]] = dict()
-        self.pipes: list[Callable[[object | list[object] | dict[str, object] | list[dict[str, object]]], Awaitable]] = list()
+        self.events: dict[str, set[str]] = dict()
+        self.listeners: dict[str, dict[str, list[Callable[[object], Callable | Awaitable]]]] = dict()
+        self.pipes: list[Callable[[object], Callable | Awaitable]] = list()
     
-    def __getattr__(self, name: str) -> list[dict[str, object]]:
+    def __getattr__(self, name: str) -> Query:
+        
         return self.get_query(name)
 
     def get_query(self, name: str) -> Query:
+        
         if name in self.queries:
             return self.queries[name]
         else:
             raise Exception(f'Error: query "{name}" could not be found!')
+        
+    async def start(self):
 
-    def register_event(self, event: str):
-        self.events.add(event)
+        self.connection: Connection = await connect(host = self.host, port = self.port, user = self.user, password = self.password, database = self.database)
 
-    def register_events(self, *events: list[str]):
-        for event in events:
-            self.register_event(event)
+        for query in self.queries.values():
+            await query.prepare()
 
-    def include_pipe(self, pipe: Callable[[str, object | list[object] | dict[str, object] | list[dict[str, object]]], Awaitable]):
+        for entity, events in self.listeners.items():
+            for event, listeners in events.items():
+                for listener in listeners:
+                    await self._listen(entity, event, listener)
+
+        for pipe in self.pipes:
+            await self._pipe(pipe)
+
+    async def stop(self):
+
+        await self.connection.close()
+
+    def listen(self, entity: str, event: str) -> Callable[[str], Callable[[dict | str], None]]:
+        def decorate(callback: Callable[[dict | str], None]) -> None:
+            self.include_listener(entity, event, callback)
+        return decorate
+    
+    def include_event(self, entity: str, event: str):
+        
+        self.events[entity] = self.events.get(entity, set())
+        self.events[entity].add(event)
+
+    def include_events(self, events: list[tuple[str, str]]):
+        
+        for (entity, event) in events:
+            self.include_event(entity, event)
+
+    def include_listener(self, entity: str, event: str, listener: Callable[[object], Callable | Awaitable]):
+        
+        self.listeners[entity] = self.listeners.get(entity, dict())
+        self.listeners[entity][event] = self.listeners[entity].get(event, list())
+        self.listeners[entity][event].append(listener)
+
+    def include_pipe(self, pipe: Callable[[object], Callable | Awaitable]):
+
         self.pipes.append(pipe)
 
-    def include_pipes(self, pipes: list[Callable[[str, object | list[object] | dict[str, object] | list[dict[str, object]]], Awaitable]]):
-        for pipe in pipes:
-            self.include_pipe(pipe)
-
     def include_router(self, router: SQLRouter):
-        router.database = self
-        for event, listeners in router.listeners.items():
-            self.events.add(event)
-            self.listeners[event] = self.listeners.get(event, []) + listeners
 
-    def include_routers(self, routers: list[SQLRouter]):
-        for router in routers:
-            self.include_router(router)
+        router.database = self
+
+        for entity, events in router.listeners.items():
+            for event, listeners in events.items():
+                self.include_event(entity, event)
+                for listener in listeners:
+                    self.include_listener(entity, event, listener)
 
     def include_query(self, name: str, query: str):
+        
         if name in self.queries:
             raise Exception('Error: multiple queries with the same alias!')
         else:
@@ -160,27 +200,9 @@ class SQLClient:
 
             if isdir(f'{path}/{item}'):
                 self.include_queries(f'{path}/{item}', prefix = identifier)
-
-    async def start(self):
-
-        self.connection: Connection = await connect(host = self.host, port = self.port, user = self.user, password = self.password, database = self.database)
-
-        for query in self.queries.values():
-            await query.prepare()
-
-        for event, listeners in self.listeners.items():
-            for listener in listeners:
-                await self._listen(event, listener)
-
-        for pipe in self.pipes:
-            await self._pipe(pipe)
-
-        await self._log()
-
-    async def stop(self):
-        await self.connection.close()
     
     async def _prepare(self, query: str) -> PreparedStatement:
+
         return await self.connection.prepare(query)
 
     async def _execute(self, statement: PreparedStatement, parameters: list[object]):
@@ -211,7 +233,7 @@ class SQLClient:
                 if len(records[0]) > 1:
                     return [{name: value for name, value in record.items()} for record in records]
 
-    async def _listen(self, event: str, callback: Callable[[object | list[object] | dict[str, object] | list[dict[str, object]]], Awaitable]):
+    async def _listen(self, entity: str, event: str, callback: Callable[[object | list[object] | dict[str, object] | list[dict[str, object]]], Awaitable]):
         
         async def handle(connection, pid, event, payload):
             try:
@@ -219,23 +241,19 @@ class SQLClient:
             except ValueError:
                 await callback(payload)
 
-        await self.connection.add_listener(event, handle)
+        await self.connection.add_listener(f'{entity}.{event}', handle)
 
     async def _pipe(self, callback: Callable[[str, object | list[object] | dict[str, object] | list[dict[str, object]]], Awaitable]):
 
-        async def handle(connection, pid, event, payload):
+        async def handle(connection, pid, _event, payload):
+
+            entity, event = _event.split('.')
+
             try:
-                await callback(event, loads(payload))
+                await callback(entity, event, loads(payload))
             except ValueError:
-                await callback(event, payload)
+                await callback(entity, event, payload)
 
-        for event in self.events:
-            await self.connection.add_listener(event, handle)
-
-    async def _log(self):
-
-        async def handle(connection, pid, event, payload):
-            self.logger.info(f'Event "{event}" was recieved.')
-
-        for event in self.events:
-            await self.connection.add_listener(event, handle)
+        for entity, events in self.events.items():
+            for event in events:
+                await self.connection.add_listener(f'{entity}.{event}', handle)
