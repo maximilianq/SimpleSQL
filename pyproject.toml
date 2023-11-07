@@ -7,7 +7,7 @@ package-dir = {simplesql = "src" }
 
 [project]
 name = "simplesql"
-version = "0.0.7"
+version = "0.0.8"
 authors = [
   {name = "Maximilian Quaeck", email = "maximilian.quaeck@gmx.de"}
 ]
