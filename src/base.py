@@ -41,7 +41,7 @@ class Query:
 
         self.parameters = list(dict.fromkeys([item[1] for item in formatter.parse(self.query) if item[1]]))
         for index, parameter in enumerate(self.parameters):
-            self.formatted = self.formatted.replace('{' + parameter + '}', '$' + str(index + 1))
+            self.formatted = self.formatted.replace('${' + parameter + '}', '$' + str(index + 1))
 
     async def prepare(self) -> None:
         self.database.logger.debug(f'Preparing query "{self.name}" for a later use.')
@@ -222,7 +222,10 @@ class SQLClient:
             if len(records) == 1:
                 if len(records[0]) == 1:
                     try:
-                        return loads(records[0][0])
+                        if records[0][0]:
+                            return loads(records[0][0])
+                        else:
+                            return records[0][0]
                     except ValueError:
                         return records[0][0]
                 if len(records[0]) > 1:
